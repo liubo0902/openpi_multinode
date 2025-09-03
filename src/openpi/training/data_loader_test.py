@@ -1,6 +1,10 @@
 import dataclasses
 
 import jax
+import time
+import os
+MASTER_ADDR = os.environ.get("MASTER_ADDR", None)
+MASTER_PORT = os.environ.get("MASTER_PORT", None)
 
 from openpi.models import pi0
 from openpi.training import config as _config
@@ -82,3 +86,42 @@ def test_with_real_dataset():
 
     for _, actions in batches:
         assert actions.shape == (config.batch_size, config.model.action_horizon, config.model.action_dim)
+
+def test_with_distributed_torch_dataset():
+    
+    ### Set up jax distributed env (I am using Nvidia A800)
+    if int(os.environ.get("SLURM_NTASKS", "0")) > 1:
+        jax.distributed.initialize()
+    # Set master addr and port after jax distributed initialization
+    if MASTER_ADDR:
+        os.environ['MASTER_ADDR'] = MASTER_ADDR
+    if MASTER_PORT:
+        os.environ['MASTER_PORT'] = MASTER_PORT
+    os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
+    print(f"total rank = {jax.process_count()}")
+
+
+    config = _config.get_config("debug")
+    model_config = config.model
+
+    loader = _data_loader.create_distributed_torch_data_loader(
+        config.data, 
+        model_config, 
+        action_horizon=config.model.action_horizon,
+        batch_size=config.batch_size,
+        rank=jax.process_index(), 
+        world_size=jax.process_count(),
+        skip_norm_stats=True, 
+        num_workers=2,
+        seed=0,
+        shuffle=True,
+    )
+    data_iter = iter(loader)
+
+    for _ in range(10):
+        batch = next(data_iter)
+        print(f"load one data from rank {jax.process_index()}", flush=True)
+        time.sleep(1)
+
+if __name__ == "__main__":
+    test_with_distributed_torch_dataset()

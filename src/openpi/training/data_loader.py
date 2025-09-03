@@ -134,7 +134,7 @@ def create_torch_dataset(
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
-        return FakeDataset(model_config, num_samples=1024)
+        return FakeDataset(model_config, num_samples=1024*8)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
@@ -337,6 +337,97 @@ def create_rlds_data_loader(
     return DataLoaderImpl(data_config, data_loader)
 
 
+def create_distributed_torch_data_loader(
+    data_config: _config.DataConfig,
+    model_config: _model.BaseModelConfig,
+    action_horizon: int,
+    batch_size: int,
+    rank: int,
+    world_size: int,
+    *,
+    sharding: jax.sharding.Sharding | None = None,
+    skip_norm_stats: bool = False,
+    shuffle: bool = False,
+    num_batches: int | None = None,
+    num_workers: int = 0,
+    seed: int = 0,
+):
+
+    dataset = create_torch_dataset(data_config, action_horizon, model_config)
+
+    # Please uncomment this part accoding to your own needs
+    # dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+
+    sampler = torch.utils.data.DistributedSampler(dataset, num_replicas=world_size, rank=rank)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+
+    mp_context = None
+    if num_workers > 0:
+        mp_context = multiprocessing.get_context("spawn")
+
+    distributed_data_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,  # Note this is local batch size
+        num_workers=num_workers,
+        sampler=sampler,
+        collate_fn=_collate_fn,
+        # worker_init_fn=_worker_init_fn,
+        persistent_workers=num_workers > 0,
+        drop_last=True,
+        generator=generator,
+        multiprocessing_context=mp_context,
+    )
+
+    data_loader = DistributedTorchDataLoader(
+        distributed_data_loader,
+        sharding=sharding,
+        num_batches=num_batches,
+    )
+    return DataLoaderImpl(data_config, data_loader)
+
+
+class DistributedTorchDataLoader:
+    def __init__(
+        self,
+        data_loader: torch.utils.data.DataLoader,
+        *,
+        sharding: jax.sharding.Sharding | None = None,
+        num_batches: int | None = None,
+    ):
+        if sharding is None:
+            # Use data parallel sharding by default.
+            sharding = jax.sharding.NamedSharding(
+                jax.sharding.Mesh(jax.devices(), ("B",)),
+                jax.sharding.PartitionSpec("B"),
+            )
+        self._sharding = sharding
+        self._num_batches = num_batches
+        self._data_loader = data_loader
+
+    def __iter__(self):
+        num_items = 0
+        while True:
+            # The DistributedSampler needs to have its epoch set to shuffle data between epochs.
+            if isinstance(self._data_loader.sampler, torch.utils.data.DistributedSampler):
+                # The epoch number is not critical here, but it should be different for each iteration
+                # to get different shuffling. We can use the num_items / len(self._data_loader)
+                # to approximate the epoch.
+                epoch = (num_items // len(self._data_loader)) if len(self._data_loader) > 0 else 0
+                self._data_loader.sampler.set_epoch(epoch)
+
+            data_iter = iter(self._data_loader)
+            while True:
+                if self._num_batches is not None and num_items >= self._num_batches:
+                    return
+                try:
+                    batch = next(data_iter)
+                except StopIteration:
+                    break  # We've exhausted the dataset. Create a new iterator and start over.
+                num_items += 1
+                yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
+
+
 class TorchDataLoader:
     def __init__(
         self,
@@ -478,7 +569,7 @@ class RLDSDataLoader:
 
 
 class DataLoaderImpl(DataLoader):
-    def __init__(self, data_config: _config.DataConfig, data_loader: TorchDataLoader | RLDSDataLoader):
+    def __init__(self, data_config: _config.DataConfig, data_loader: TorchDataLoader | RLDSDataLoader | DistributedTorchDataLoader):
         self._data_config = data_config
         self._data_loader = data_loader
 

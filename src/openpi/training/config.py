@@ -177,6 +177,10 @@ class DataConfigFactory(abc.ABC):
 class FakeDataConfig(DataConfigFactory):
     repo_id: str = "fake"
 
+    # Set up empty repack transforms and data_transforms
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(default_factory=_transforms.Group)
+    data_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(default_factory=_transforms.Group)
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         return DataConfig(repo_id=self.repo_id)
@@ -710,12 +714,12 @@ _CONFIGS = [
     TrainConfig(
         name="debug",
         data=FakeDataConfig(),
-        batch_size=2,
-        model=pi0.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy"),
-        save_interval=100,
+        batch_size=32,
+        model=pi0.Pi0Config(),
+        save_interval=2000,
         overwrite=True,
         exp_name="debug",
-        num_train_steps=10,
+        num_train_steps=10000,
         wandb_enabled=False,
     ),
     TrainConfig(

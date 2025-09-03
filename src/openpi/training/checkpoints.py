@@ -22,20 +22,25 @@ def initialize_checkpoint_dir(
 ) -> tuple[ocp.CheckpointManager, bool]:
     checkpoint_dir = epath.Path(checkpoint_dir).resolve()
     resuming = False
-    if checkpoint_dir.exists():
-        if overwrite:
-            checkpoint_dir.rmtree()
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            logging.info(f"Wiped checkpoint directory {checkpoint_dir}")
-        elif resume:
-            resuming = True
-        else:
-            raise FileExistsError(
-                f"Checkpoint directory {checkpoint_dir} already exists. Use --overwrite or --resume "
-                "to indicate how to handle it."
-            )
-
+    if resume is True:
+        resuming = True
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if jax.process_index() == 0:
+        if checkpoint_dir.exists():
+            if overwrite:
+                checkpoint_dir.rmtree()
+                checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                logging.info(f"Wiped checkpoint directory {checkpoint_dir}")
+            elif resume:
+                logging.info(f"Resuming training from checkpoint directory {checkpoint_dir}")
+                resuming = True
+            else:
+                # raise FileExistsError(
+                #     f"Checkpoint directory {checkpoint_dir} already exists. Use --overwrite or --resume "
+                #     "to indicate how to handle it."
+                # )
+                pass
+
 
     mngr = ocp.CheckpointManager(
         checkpoint_dir,
@@ -121,12 +126,18 @@ class Callback(Protocol):
 class CallbackHandler(ocp.AsyncCheckpointHandler):
     """A CheckpointHandler for calling an arbitrary function asynchronously. Only for saving, not for restoring."""
 
-    def save(self, directory: epath.Path, args: CallbackSave):
+    def __init__(self):
+        self._executor = futures.ThreadPoolExecutor(max_workers=1)
+
+    def close(self):
+        self._executor.shutdown()
+
+    def save(self, directory: epath.Path, args: "CallbackSave"):
         if jax.process_index() == 0:
             args.callback(directory)
 
-    async def async_save(self, directory: epath.Path, args: CallbackSave) -> list[futures.Future]:
-        return [future.CommitFutureAwaitingContractedSignals(asyncio.to_thread(self.save, directory, args))]
+    async def async_save(self, directory: epath.Path, args: "CallbackSave") -> list[futures.Future]:
+        return [self._executor.submit(self.save, directory, args)]
 
     def restore(self, *args, **kwargs):
         raise NotImplementedError("CallbackHandler does not support restore")

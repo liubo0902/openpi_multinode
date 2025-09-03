@@ -122,11 +122,21 @@ class Observation(Generic[ArrayT]):
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
-        """Convert the Observation to a nested dict."""
-        result = dataclasses.asdict(self)
-        result["image"] = result.pop("images")
-        result["image_mask"] = result.pop("image_masks")
-        return result
+        """Convert the Observation to a nested dict without deep-copying arrays."""
+        out: dict[str, object] = {
+            "image": self.images,
+            "image_mask": self.image_masks,
+            "state": self.state,
+        }
+        if self.tokenized_prompt is not None:
+            out["tokenized_prompt"] = self.tokenized_prompt
+        if self.tokenized_prompt_mask is not None:
+            out["tokenized_prompt_mask"] = self.tokenized_prompt_mask
+        if self.token_ar_mask is not None:
+            out["token_ar_mask"] = self.token_ar_mask
+        if self.token_loss_mask is not None:
+            out["token_loss_mask"] = self.token_loss_mask
+        return out
 
 
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
