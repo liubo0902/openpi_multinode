@@ -356,7 +356,7 @@ def create_distributed_torch_data_loader(
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
 
     # Please uncomment this part accoding to your own needs
-    # dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+    dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     sampler = torch.utils.data.DistributedSampler(dataset, num_replicas=world_size, rank=rank)
     generator = torch.Generator()

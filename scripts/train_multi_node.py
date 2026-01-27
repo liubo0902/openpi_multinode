@@ -12,7 +12,7 @@ try:
     os.makedirs(os.environ["CUDA_CACHE_PATH"], exist_ok=True)
 except Exception:
     pass
-os.environ["HF_LEROBOT_HOME"] = "/x2robot_v2/xinyuanfang/projects_v2/.cache/lerobot"
+os.environ["HF_LEROBOT_HOME"] = "/root/.cache/huggingface/lerobot"
 # os.environ['CUDA_VISIBLE_DEVICES'] = '6,7'
 os.environ['OPENPI_DATA_HOME'] = '/x2robot_v2/xinyuanfang/projects_v2/.cache/openpi'
 
@@ -21,6 +21,8 @@ import functools
 import logging
 import platform
 from typing import Any
+# import turbox
+import time
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -44,6 +46,41 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
+
+import queue as Queue
+import threading
+import torch
+from torch.utils.data import DataLoader
+
+
+class PrefetchGenerator(threading.Thread):
+    """A general prefetch generator.
+    Reference: https://stackoverflow.com/questions/7323664/python-generator-pre-fetch
+    Args:
+        generator: Python generator.
+        num_prefetch_queue (int): Number of prefetch queue.
+    """
+
+    def __init__(self, generator, num_prefetch_queue):
+        threading.Thread.__init__(self)
+        self.queue = Queue.Queue(num_prefetch_queue)
+        self.generator = generator
+        self.daemon = True
+        self.start()
+
+    def run(self):
+        for item in self.generator:
+            self.queue.put(item)
+        self.queue.put(None)
+
+    def __next__(self):
+        next_item = self.queue.get()
+        if next_item is None:
+            raise StopIteration
+        return next_item
+
+    def __iter__(self):
+        return self
 
 
 def init_logging():
@@ -212,8 +249,9 @@ def train_step(
 def main(config: _config.TrainConfig):
 
     ### Set up jax distributed env (I am using Nvidia A800)
-    if int(os.environ.get("SLURM_NTASKS", "0")) > 1:
-        jax.distributed.initialize()
+    # if int(os.environ.get("SLURM_NTASKS", "0")) > 1:
+    print(os.environ)
+    jax.distributed.initialize(f'{MASTER_ADDR}:{MASTER_PORT}', int(os.environ['WORLD_SIZE']), int(os.environ['RANK']))
     # Set master addr and port after jax distributed initialization
     if MASTER_ADDR:
         os.environ['MASTER_ADDR'] = MASTER_ADDR
@@ -253,16 +291,17 @@ def main(config: _config.TrainConfig):
     )
     if jax.process_index() == 0:
         init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+    data_config = config.data.create(config.assets_dirs, config.model)
 
     data_loader = _data_loader.create_distributed_torch_data_loader(
-        config.data, 
+        data_config, 
         config.model, 
         action_horizon=config.model.action_horizon,
         batch_size=config.batch_size,
         rank=jax.process_index(), 
         world_size=jax.process_count(),
         skip_norm_stats=True, 
-        # num_workers=2,
+        num_workers=2,
         seed=0,
         shuffle=True,
     )
@@ -274,7 +313,9 @@ def main(config: _config.TrainConfig):
         print(f"rank {jax.process_index()}: All processes synchronized after dataset initialization", flush=True)
 
     data_iter = iter(data_loader)
-    batch = next(data_iter)
+    # batch = next(data_iter)
+    _data_iter = PrefetchGenerator(data_iter, 4)
+    batch = next(_data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     # # Log images from first batch to sanity check.
@@ -308,6 +349,10 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+    '''
+    _data_iter = PrefetchGenerator(data_iter, 2)
+    batch = next(_data_iter)
+    '''
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
@@ -320,7 +365,8 @@ def main(config: _config.TrainConfig):
             if jax.process_index() == 0:
                 wandb.log(reduced_info, step=step)
             infos = []
-        batch = next(data_iter)
+
+        batch = next(_data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
