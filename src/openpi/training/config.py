@@ -620,7 +620,6 @@ _CONFIGS = [
         data=LeRobotLiberoDataConfig(
             repo_id="your_hf_username/libero",
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=True,
         ),
         # Note that we load the pi0-FAST base model checkpoint here.
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_fast_base/params"),
